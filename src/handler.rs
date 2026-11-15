@@ -1,6 +1,7 @@
 //! SSH client handler with configurable host-key verification.
 
 use russh::client::Handler;
+use russh::keys::PublicKeyOrCertificate;
 use russh::keys::ssh_key;
 use std::sync::Arc;
 use tracing::{debug, warn};
@@ -39,9 +40,13 @@ impl Handler for ClientHandler {
 
     async fn check_server_key(
         &mut self,
-        server_public_key: &ssh_key::PublicKey,
+        server_public_key: &PublicKeyOrCertificate,
     ) -> Result<bool, Self::Error> {
-        match self.verifier.verify(&self.host, server_public_key) {
+        // A host certificate carries its own public key; verify that key
+        // rather than the certificate wrapper so verifiers keep a simple
+        // `&ssh_key::PublicKey` API.
+        let key = server_public_key.public_key();
+        match self.verifier.verify(&self.host, &key) {
             Ok(()) => {
                 debug!("Server host key accepted for {}", self.host);
                 Ok(true)

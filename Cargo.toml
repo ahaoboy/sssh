@@ -5,7 +5,6 @@ edition = "2024"
 description = "A simple SSH client library and CLI."
 license = "MIT"
 repository = "https://github.com/ahaoboy/sssh"
-homepage = "https://github.com/ahaoboy/sssh"
 
 [lib]
 name = "sssh"
@@ -21,7 +20,7 @@ default = ["cli"]
 cli = ["dep:clap", "dep:crossterm", "dep:rpassword", "dep:tracing-subscriber"]
 
 [dependencies]
-russh = { version = "0.61", default-features = false, features = ["ring", "flate2", "rsa"] }
+russh = { version = "0.65", default-features = false, features = ["ring", "flate2", "rsa"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
