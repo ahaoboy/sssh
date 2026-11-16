@@ -22,6 +22,7 @@
 //! - **Command output** as a [`std::process::Output`]-shaped [`Output`]
 //!   (raw `stdout`/`stderr` bytes plus an [`ExitStatus`]), with streaming
 //!   variants that write straight to any `AsyncWrite`.
+//! - **Remote system information** via [`Client::uname`] ([`Uname`]).
 //! - **Remote filesystem API** via [`fs`] — a [`std::fs`]-like layer
 //!   (`read`, `write`, `create_dir_all`, `try_exists`, `metadata`,
 //!   `read_dir`, `symlink`, `download`, `upload`, …) on top of [`Client`].
@@ -102,6 +103,7 @@ mod io_loop;
 mod output;
 mod session;
 mod shell;
+mod sys;
 
 #[cfg(feature = "cli")]
 pub mod cli;
@@ -113,3 +115,4 @@ pub use handler::{AcceptAll, HostKeyVerifier};
 pub use output::{ExitStatus, Output};
 pub use session::{Auth, Config, EventSink, Session, exec, parse_target};
 pub use shell::shell_quote;
+pub use sys::Uname;

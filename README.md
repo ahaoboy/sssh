@@ -11,6 +11,7 @@ A simple SSH client library and CLI built on [russh](https://github.com/warp-tec
   without buffering whole files in memory
 - **`std::process`-shaped output** — `Output` with raw `stdout`/`stderr` bytes
   and an `ExitStatus` (`success()`, `code()`, `signal()`)
+- **Remote system info** — `Client::uname()` returns OS, release, machine, …
 - **Three modes** — interactive shell, idle keep-alive, one-shot command execution
 - **Configurable host-key verification** — plug in your own policy (TOFU, known_hosts)
 - **Connection timeout** — prevent hangs on unreachable hosts
@@ -41,6 +42,17 @@ use sssh::{exec, Auth};
 let output = exec("user@host", 22, Auth::password("pass"), "uname -a").await?;
 println!("stdout: {}", output.stdout_lossy());
 println!("exit: {:?}", output.code());
+```
+
+### Library — remote system information
+
+```rust
+use sssh::{Auth, Client};
+
+let client = Client::connect_target("user@host", 22, Auth::password("pass"), Some(10)).await?;
+let uname = client.uname().await?;
+println!("{} {} {}", uname.sysname, uname.release, uname.machine);
+println!("os: {:?}", uname.os);
 ```
 
 ### Library — interactive shell
