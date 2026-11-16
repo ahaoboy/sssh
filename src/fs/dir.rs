@@ -115,12 +115,10 @@ impl Fs {
 }
 
 const CANONICALIZE_SCRIPT: &str = r#"p=__PATH__
-if command -v readlink >/dev/null 2>&1; then
-  resolved=$(readlink -f "$p" 2>/dev/null) || resolved=
-  if [ -n "$resolved" ]; then
-    printf '%s\n' "$resolved"
-    exit 0
-  fi
+resolved=$(readlink -f "$p" 2>/dev/null) || resolved=
+if [ -n "$resolved" ]; then
+  printf '%s\n' "$resolved"
+  exit 0
 fi
 if [ -d "$p" ]; then
   cd "$p" 2>/dev/null && pwd -P

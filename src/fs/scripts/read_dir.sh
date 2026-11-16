@@ -24,7 +24,7 @@ if [ -L "$dir" ]; then
   exit 0
 fi
 
-if command -v find >/dev/null 2>&1; then
+if type find >/dev/null 2>&1; then
   printf 'MODE=find\n'
   find "$dir" -mindepth 1 -maxdepth 1 -print0 2>/dev/null
 else

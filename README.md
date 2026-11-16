@@ -122,7 +122,9 @@ fs.upload("/tmp/firmware.bin", upload).await?;
 Implementations map to standard POSIX utilities (`cat`, `mkdir`, `rm`, `mv`,
 `cp`, `ln`, `stat`, `df`), so they work on GNU/Linux, BusyBox (routers, Alpine),
 and BSD/macOS. Writes are verified by size, so a full disk cannot silently
-produce a truncated file.
+produce a truncated file. Hosts whose BusyBox build omits `stat` (some routers)
+fall back to `ls`/`date`, so `metadata()` still reports size, mode, ids and
+mtime.
 
 | API | Maps to |
 |-----|---------|

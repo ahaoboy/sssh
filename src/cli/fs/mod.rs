@@ -165,7 +165,13 @@ pub struct WriteArgs {
     /// Remote file path.
     pub path: String,
     /// Literal contents (default: read stdin).
-    #[arg(short = 'c', long, value_name = "TEXT", conflicts_with = "from")]
+    #[arg(
+        short = 'c',
+        long,
+        value_name = "TEXT",
+        conflicts_with = "from",
+        allow_hyphen_values = true
+    )]
     pub content: Option<String>,
     /// Read contents from a local file.
     #[arg(long, value_name = "FILE")]
