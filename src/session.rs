@@ -10,24 +10,26 @@
 //! and keep the session alive) and [`Session::exec`] (run a single command and
 //! return its captured output + exit status).
 
+use russh::Disconnect;
 use russh::client;
 use russh::keys::{HashAlg, PrivateKeyWithHashAlg, decode_secret_key};
-use russh::{ChannelMsg, Disconnect};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
+use crate::client::Client;
 use crate::error::Error;
 use crate::handler::{AcceptAll, ClientHandler, HostKeyVerifier};
 use crate::io_loop::io_loop;
+use crate::output::Output;
 
 // ── Public types ────────────────────────────────────────────────────────
 
 /// Connection / authentication configuration.
-#[derive(serde::Deserialize)]
+#[derive(Clone, serde::Deserialize)]
 pub struct Config {
     pub host: String,
     pub port: u16,
@@ -45,12 +47,8 @@ pub struct Config {
     #[serde(default)]
     pub timeout_secs: Option<u64>,
     /// Host-key verification policy. Defaults to [`AcceptAll`] (insecure).
-    #[serde(skip, default = "default_verifier")]
+    #[serde(skip)]
     pub host_key_verifier: Option<Arc<dyn HostKeyVerifier>>,
-}
-
-fn default_verifier() -> Option<Arc<dyn HostKeyVerifier>> {
-    None
 }
 
 // Manual impls to skip the trait-object field in Debug output.
@@ -71,23 +69,6 @@ impl std::fmt::Debug for Config {
                 &self.host_key_verifier.as_ref().map(|_| "…"),
             )
             .finish()
-    }
-}
-
-impl Clone for Config {
-    fn clone(&self) -> Self {
-        Self {
-            host: self.host.clone(),
-            port: self.port,
-            username: self.username.clone(),
-            password: self.password.clone(),
-            private_key: self.private_key.clone(),
-            command: self.command.clone(),
-            cols: self.cols,
-            rows: self.rows,
-            timeout_secs: self.timeout_secs,
-            host_key_verifier: self.host_key_verifier.clone(),
-        }
     }
 }
 
@@ -117,16 +98,35 @@ pub trait EventSink: Send + Sync + 'static {
     fn on_closed(&self);
 }
 
-/// Captured output of a one-shot command ([`Session::exec`]).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-#[must_use = "Output contains the exit code — check it"]
-pub struct Output {
-    /// Captured stdout of the command.
-    pub stdout: String,
-    /// Captured stderr of the command.
-    pub stderr: String,
-    /// Exit status reported by the remote host, when available.
-    pub exit_code: Option<u32>,
+/// Delivers sink events and guarantees [`EventSink::on_closed`] fires once,
+/// even when the remote closes and the caller disconnects concurrently.
+pub(crate) struct SinkNotify {
+    sink: Arc<dyn EventSink>,
+    closed: AtomicBool,
+}
+
+impl SinkNotify {
+    pub(crate) fn new(sink: Arc<dyn EventSink>) -> Arc<Self> {
+        Arc::new(Self {
+            sink,
+            closed: AtomicBool::new(false),
+        })
+    }
+
+    pub(crate) fn connected(&self) {
+        self.sink.on_connected();
+    }
+
+    pub(crate) fn data(&self, data: String) {
+        self.sink.on_data(data);
+    }
+
+    /// Notify closure at most once.
+    pub(crate) fn close(&self) {
+        if !self.closed.swap(true, Ordering::AcqRel) {
+            self.sink.on_closed();
+        }
+    }
 }
 
 /// Authentication credentials for a session.
@@ -161,13 +161,33 @@ impl From<Auth> for (Option<String>, Option<String>) {
 }
 
 /// Parse `[user@]host` into `(username, host)`.
+///
+/// Without `user@`, the local user name (`USER`/`USERNAME`/`LOGNAME`) is used,
+/// matching `ssh host`.
 pub fn parse_target(target: &str) -> Result<(String, String), String> {
-    match target.split_once('@') {
-        Some((user, host)) if !user.is_empty() && !host.is_empty() => {
-            Ok((user.to_string(), host.to_string()))
-        }
-        _ => Err(format!("invalid target '{target}', expected user@host")),
+    let target = target.trim();
+    if target.is_empty() {
+        return Err("empty target, expected [user@]host".into());
     }
+    if let Some((user, host)) = target.split_once('@') {
+        if user.is_empty() || host.is_empty() {
+            return Err(format!("invalid target '{target}', expected [user@]host"));
+        }
+        return Ok((user.to_string(), host.to_string()));
+    }
+    match local_user() {
+        Some(user) => Ok((user, target.to_string())),
+        None => Err(format!(
+            "invalid target '{target}', expected [user@]host (cannot determine the local user)"
+        )),
+    }
+}
+
+/// The local user name, used when a target omits `user@`.
+fn local_user() -> Option<String> {
+    ["USER", "USERNAME", "LOGNAME"]
+        .iter()
+        .find_map(|key| std::env::var(key).ok().filter(|value| !value.is_empty()))
 }
 
 /// Connect to `user@host:port`, run `command`, and return its captured
@@ -181,8 +201,8 @@ pub fn parse_target(target: &str) -> Result<(String, String), String> {
 /// ```no_run
 /// # async fn run() -> Result<(), sssh::Error> {
 /// let out = sssh::exec("user@host", 22, sssh::Auth::password("pass"), "uname -a").await?;
-/// println!("{}", out.stdout);
-/// println!("exit: {:?}", out.exit_code);
+/// println!("{}", out.stdout_lossy());
+/// println!("exit: {:?}", out.code());
 /// # Ok(()) }
 /// ```
 pub async fn exec(target: &str, port: u16, auth: Auth, command: &str) -> Result<Output, Error> {
@@ -219,7 +239,7 @@ pub struct Session {
     handle: Option<client::Handle<ClientHandler>>,
     control_tx: Option<mpsc::UnboundedSender<Msg>>,
     reader_task: Option<JoinHandle<()>>,
-    sink: Option<Arc<dyn EventSink>>,
+    notify: Option<Arc<SinkNotify>>,
 }
 
 impl Session {
@@ -229,7 +249,7 @@ impl Session {
     /// On success [`EventSink::on_connected`] is invoked and the background
     /// I/O task is running.
     pub async fn connect<S: EventSink>(config: Config, sink: S) -> Result<Self, Error> {
-        let sink: Arc<dyn EventSink> = Arc::new(sink);
+        let notify = SinkNotify::new(Arc::new(sink));
 
         info!(
             "Connecting to {}@{}:{} (auth: {}, cmd: {}, cols: {}x{})",
@@ -277,18 +297,16 @@ impl Session {
 
         // ── Spawn background I/O task ─────────────────────────
         let (control_tx, control_rx) = mpsc::unbounded_channel();
-        let reader_task = tokio::spawn(io_loop(channel, control_rx, Arc::clone(&sink)));
+        notify.connected();
+        let reader_task = tokio::spawn(io_loop(channel, control_rx, Arc::clone(&notify)));
+        info!("SSH session ready");
 
-        let session = Session {
+        Ok(Session {
             handle: Some(handle),
             control_tx: Some(control_tx),
             reader_task: Some(reader_task),
-            sink: Some(sink),
-        };
-
-        session.sink.as_ref().expect("sink just set").on_connected();
-        info!("SSH session ready");
-        Ok(session)
+            notify: Some(notify),
+        })
     }
 
     /// Connect and authenticate only — no channel, shell, or I/O loop is
@@ -299,7 +317,7 @@ impl Session {
     /// open channels later via the raw russh handle) or wants to keep a
     /// connection warm. [`EventSink::on_connected`] is invoked on success.
     pub async fn connect_idle<S: EventSink>(config: Config, sink: S) -> Result<Self, Error> {
-        let sink: Arc<dyn EventSink> = Arc::new(sink);
+        let notify = SinkNotify::new(Arc::new(sink));
 
         info!(
             "Connecting (idle) to {}@{}:{} (auth: {})",
@@ -314,17 +332,15 @@ impl Session {
         );
 
         let handle = authenticate(&config).await?;
+        notify.connected();
+        info!("Idle SSH session ready");
 
-        let session = Session {
+        Ok(Session {
             handle: Some(handle),
             control_tx: None,
             reader_task: None,
-            sink: Some(sink),
-        };
-
-        session.sink.as_ref().expect("sink just set").on_connected();
-        info!("Idle SSH session ready");
-        Ok(session)
+            notify: Some(notify),
+        })
     }
 
     /// Connect, authenticate, execute a single command, capture its output and
@@ -347,8 +363,8 @@ impl Session {
     pub async fn exec_stream<W1, W2>(
         config: Config,
         command: &str,
-        mut out: W1,
-        mut err: W2,
+        out: W1,
+        err: W2,
     ) -> Result<Output, Error>
     where
         W1: tokio::io::AsyncWrite + Unpin + Send,
@@ -366,64 +382,10 @@ impl Session {
             },
         );
 
-        let handle = authenticate(&config).await?;
-
-        debug!("Opening session channel…");
-        let mut channel = handle
-            .channel_open_session()
-            .await
-            .map_err(|e| Error::Other(format!("Failed to open channel: {e}")))?;
-
-        debug!("Executing remote command: {command}");
-        channel
-            .exec(true, command.as_bytes())
-            .await
-            .map_err(|e| Error::Other(format!("Failed to execute command: {e}")))?;
-
-        // No stdin to provide; signal EOF immediately so commands that read
-        // stdin (e.g. an interactive shell started by a misbehaving command)
-        // don't block forever waiting for input.
-        let _ = channel.eof().await;
-
-        let mut result = Output::default();
-
-        loop {
-            match channel.wait().await {
-                Some(ChannelMsg::Data { data }) => {
-                    let _ = out.write_all(&data).await;
-                    let _ = out.flush().await;
-                    result.stdout.push_str(&String::from_utf8_lossy(&data));
-                }
-                Some(ChannelMsg::ExtendedData { data, .. }) => {
-                    // ext == 1 is stderr per RFC 4254; route all extended
-                    // data to stderr for simplicity.
-                    let _ = err.write_all(&data).await;
-                    let _ = err.flush().await;
-                    result.stderr.push_str(&String::from_utf8_lossy(&data));
-                }
-                Some(ChannelMsg::ExitStatus { exit_status }) => {
-                    result.exit_code = Some(exit_status);
-                }
-                Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => {
-                    debug!("Command channel closed (EOF/Close)");
-                    break;
-                }
-                _ => {}
-            }
-        }
-
-        let _ = channel.close().await;
-        let _ = handle
-            .disconnect(Disconnect::ByApplication, "session done", "en")
-            .await;
-
-        info!(
-            "Command finished: exit={:?}, stdout={}B, stderr={}B",
-            result.exit_code,
-            result.stdout.len(),
-            result.stderr.len(),
-        );
-        Ok(result)
+        let client = Client::connect(&config).await?;
+        let result = client.exec_stream(command, out, err).await;
+        client.disconnect().await;
+        result
     }
 
     /// Send terminal input to the remote host.
@@ -477,8 +439,8 @@ impl Session {
         if let Some(task) = self.reader_task.take() {
             task.abort();
         }
-        if let Some(sink) = self.sink.take() {
-            sink.on_closed();
+        if let Some(notify) = self.notify.take() {
+            notify.close();
         }
         debug!("SSH session fully disconnected");
     }
@@ -486,9 +448,13 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        // Safety net: if `disconnect` was not called, still abort the task.
+        // Safety net: if `disconnect` was not called, still abort the task and
+        // honour the "on_closed fires once" contract.
         if let Some(task) = self.reader_task.take() {
             task.abort();
+        }
+        if let Some(notify) = self.notify.take() {
+            notify.close();
         }
         self.handle.take();
         self.control_tx.take();
@@ -499,9 +465,9 @@ impl Drop for Session {
 
 /// TCP connect + authenticate, returning the live client handle.
 ///
-/// Shared by [`Session::connect`], [`Session::connect_idle`] and
-/// [`Session::exec_stream`].
-async fn authenticate(config: &Config) -> Result<client::Handle<ClientHandler>, Error> {
+/// Shared by [`Session::connect`], [`Session::connect_idle`],
+/// [`Session::exec_stream`] and [`Client::connect`](crate::Client::connect).
+pub(crate) async fn authenticate(config: &Config) -> Result<client::Handle<ClientHandler>, Error> {
     let client_config = client::Config::default();
 
     // Resolve the host-key verifier (default: accept all).
@@ -535,7 +501,7 @@ async fn authenticate(config: &Config) -> Result<client::Handle<ClientHandler>, 
     let mut handle = if let Some(secs) = config.timeout_secs {
         tokio::time::timeout(Duration::from_secs(secs), connect_fut)
             .await
-            .map_err(|_| Error::Timeout)?
+            .map_err(|_| Error::Timeout(secs))?
             .map_err(Error::Connection)?
     } else {
         connect_fut.await.map_err(Error::Connection)?
@@ -578,4 +544,34 @@ async fn authenticate(config: &Config) -> Result<client::Handle<ClientHandler>, 
     info!("Authentication succeeded");
 
     Ok(handle)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_explicit_user() {
+        assert_eq!(
+            parse_target("alice@example.com").unwrap(),
+            ("alice".into(), "example.com".into())
+        );
+    }
+
+    #[test]
+    fn rejects_empty_or_malformed_targets() {
+        assert!(parse_target("").is_err());
+        assert!(parse_target("@host").is_err());
+        assert!(parse_target("user@").is_err());
+    }
+
+    #[test]
+    fn defaults_to_the_local_user() {
+        if let Some(user) = local_user() {
+            assert_eq!(
+                parse_target("example.com").unwrap(),
+                (user, "example.com".into())
+            );
+        }
+    }
 }

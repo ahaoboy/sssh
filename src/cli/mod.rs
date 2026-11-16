@@ -18,8 +18,9 @@
 //! - **Terminal helpers** — [`run_shell`] and [`run_idle`] add raw-mode,
 //!   stdin forwarding, and Ctrl-C handling for terminal-based use.
 
+pub mod fs;
 mod input;
 mod run;
 
-pub use input::{CliInput, Mode, build_config, reconcile_command, shell_quote};
+pub use input::{Input, Mode, build_config, credentials, resolve_command, shell_quote};
 pub use run::{run_cmd, run_idle, run_shell};

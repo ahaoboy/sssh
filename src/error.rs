@@ -15,8 +15,8 @@ pub enum Error {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error("Connection timed out")]
-    Timeout,
+    #[error("Connection timed out after {0}s")]
+    Timeout(u64),
 
     #[error("{0}")]
     Other(String),

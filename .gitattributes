@@ -1,0 +1,5 @@
+* text=auto
+
+# Shell probes are embedded verbatim and run with `sh` on the remote host.
+# CRLF breaks `sh`, so always check them out with LF.
+*.sh text eol=lf

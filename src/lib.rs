@@ -19,14 +19,38 @@
 //!   known-hosts-file verification.
 //! - **Connection timeout** via [`Config::timeout_secs`].
 //! - **Shell quoting** via [`shell_quote`] for safe command construction.
+//! - **Command output** as a [`std::process::Output`]-shaped [`Output`]
+//!   (raw `stdout`/`stderr` bytes plus an [`ExitStatus`]), with streaming
+//!   variants that write straight to any `AsyncWrite`.
+//! - **Remote filesystem API** via [`fs`] — a [`std::fs`]-like layer
+//!   (`read`, `write`, `create_dir_all`, `try_exists`, `metadata`,
+//!   `read_dir`, `symlink`, `download`, `upload`, …) on top of [`Client`].
+//!
+//! ## Quick start — remote files
+//!
+//! ```no_run
+//! # async fn run(config: sssh::Config) -> Result<(), Box<dyn std::error::Error>> {
+//! use sssh::Client;
+//!
+//! let client = Client::connect(&config).await?;
+//! let fs = client.fs();
+//!
+//! fs.create_dir_all("~/.local/bin").await?;
+//! fs.write("~/.local/bin/hello.txt", b"hello over ssh\n").await?;
+//! fs.set_mode("~/.local/bin/hello.txt", 0o644).await?;
+//!
+//! println!("{}", fs.read_to_string("~/.local/bin/hello.txt").await?);
+//! println!("free: {:?}", fs.available_space("~").await?);
+//! # Ok(()) }
+//! ```
 //!
 //! ## Quick start — run a command and get the result
 //!
 //! ```no_run
 //! # async fn run() -> Result<(), sssh::Error> {
 //! let out = sssh::exec("user@host", 22, sssh::Auth::password("pass"), "uname -a").await?;
-//! println!("{}", out.stdout);
-//! println!("exit: {:?}", out.exit_code);
+//! println!("{}", out.stdout_lossy());
+//! println!("exit: {:?}", out.code());
 //! # Ok(()) }
 //! ```
 //!
@@ -36,7 +60,7 @@
 //! # async fn run() -> Result<(), sssh::Error> {
 //! let key = std::fs::read_to_string("~/.ssh/id_rsa")?;
 //! let out = sssh::exec("user@host", 22, sssh::Auth::key(key), "ls -la").await?;
-//! println!("{}", out.stdout);
+//! println!("{}", out.stdout_lossy());
 //! # Ok(()) }
 //! ```
 //!
@@ -70,23 +94,22 @@
 //! # Ok(()) }
 //! ```
 
+mod client;
 mod error;
+pub mod fs;
 mod handler;
 mod io_loop;
+mod output;
 mod session;
+mod shell;
 
 #[cfg(feature = "cli")]
 pub mod cli;
 
+pub use client::Client;
 pub use error::Error;
+pub use fs::Fs;
 pub use handler::{AcceptAll, HostKeyVerifier};
-pub use session::{Auth, Config, EventSink, Output, Session, exec, parse_target};
-
-/// Quote a string for safe inclusion as a single shell argument (POSIX-style
-/// single-quote wrapping: `'` → `'\''`).
-///
-/// This is a re-export of [`cli::input::shell_quote`] — it lives at the crate
-/// root for convenience since shell quoting is a library-level concern, not
-/// just a CLI one.
-#[cfg(feature = "cli")]
-pub use cli::shell_quote;
+pub use output::{ExitStatus, Output};
+pub use session::{Auth, Config, EventSink, Session, exec, parse_target};
+pub use shell::shell_quote;

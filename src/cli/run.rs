@@ -69,6 +69,7 @@ pub async fn run_shell(config: Config) -> Result<(), Error> {
     use tokio::io::AsyncReadExt;
     let mut stdin = tokio::io::stdin();
     let mut stdin_buf = vec![0u8; 4096];
+    let mut closed = false;
 
     loop {
         tokio::select! {
@@ -91,6 +92,7 @@ pub async fn run_shell(config: Config) -> Result<(), Error> {
                 }
             }
             _ = closed_rx.recv() => {
+                closed = true;
                 break;
             }
             _ = tokio::signal::ctrl_c() => {
@@ -99,6 +101,9 @@ pub async fn run_shell(config: Config) -> Result<(), Error> {
         }
     }
 
+    if closed {
+        println!("\r\n\x1b[33mConnection closed by remote host.\x1b[0m\r\n");
+    }
     session.disconnect();
     Ok(())
 }
@@ -146,8 +151,8 @@ where
             return Ok(());
         }
     };
-    if let Some(code) = result.exit_code {
-        std::process::exit(code as i32);
+    if let Some(code) = result.code() {
+        std::process::exit(code);
     }
     Ok(())
 }

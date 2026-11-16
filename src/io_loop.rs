@@ -10,7 +10,7 @@ use russh::client;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
-use crate::session::{EventSink, Msg};
+use crate::session::{Msg, SinkNotify};
 
 /// Drives a single SSH channel using the native `Channel` API (not
 /// `ChannelStream`), which preserves the ability to send window-change
@@ -21,7 +21,7 @@ use crate::session::{EventSink, Msg};
 pub(crate) async fn io_loop(
     mut channel: Channel<client::Msg>,
     mut control_rx: tokio::sync::mpsc::UnboundedReceiver<Msg>,
-    sink: Arc<dyn EventSink>,
+    notify: Arc<SinkNotify>,
 ) {
     info!("SSH I/O loop started");
 
@@ -30,30 +30,15 @@ pub(crate) async fn io_loop(
             // ── Read SSH channel events ───────────────────────
             msg = channel.wait() => {
                 match msg {
-                    Some(ChannelMsg::Data { data }) => {
-                        // `data` is `russh::keys::ssh_encoding::Bytes` — convert.
-                        let text = match String::from_utf8(data.to_vec()) {
-                            Ok(s) => s,
-                            Err(e) => String::from_utf8_lossy(e.as_bytes()).into_owned(),
-                        };
-                        sink.on_data(text);
-                    }
+                    Some(ChannelMsg::Data { data }) => notify.data(lossy(data.to_vec())),
+                    // Extended data (stderr) is delivered as regular data:
+                    // an interactive terminal shows both interleaved.
                     Some(ChannelMsg::ExtendedData { data, .. }) => {
-                        // Extended data (stderr) — deliver as regular data
-                        // since we're in interactive mode.
-                        let text = match String::from_utf8(data.to_vec()) {
-                            Ok(s) => s,
-                            Err(e) => String::from_utf8_lossy(e.as_bytes()).into_owned(),
-                        };
-                        sink.on_data(text);
+                        notify.data(lossy(data.to_vec()))
                     }
                     Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => {
-                        info!("SSH channel closed (EOF)");
-                        sink.on_data(
-                            "\r\n\x1b[33mConnection closed by remote host.\x1b[0m\r\n"
-                                .to_string(),
-                        );
-                        sink.on_closed();
+                        info!("SSH channel closed");
+                        notify.close();
                         break;
                     }
                     _ => {
@@ -68,9 +53,7 @@ pub(crate) async fn io_loop(
                     Some(Msg::Data(data)) => {
                         if let Err(e) = channel.data(&data[..]).await {
                             error!(%e, "Write error in SSH I/O loop");
-                            sink.on_data(
-                                format!("\r\n\x1b[31mWrite error: {e}\x1b[0m\r\n"),
-                            );
+                            notify.close();
                             break;
                         }
                     }
@@ -96,4 +79,8 @@ pub(crate) async fn io_loop(
         }
     }
     info!("SSH I/O loop ended");
+}
+
+fn lossy(data: Vec<u8>) -> String {
+    String::from_utf8(data).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
 }
