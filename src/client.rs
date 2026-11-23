@@ -252,6 +252,32 @@ impl Client {
         PathBuf::from(crate::fs::expand_with_home(path, self.home()))
     }
 
+    /// Add `dir` to `PATH` by appending one line to `shell`'s config file.
+    ///
+    /// The edit runs through a POSIX shell (`sh -c`), so it works whatever the
+    /// login shell is, and it is idempotent: the line is only appended when the
+    /// file does not already contain it.
+    ///
+    /// ```no_run
+    /// # async fn run(client: sssh::Client) -> Result<(), sssh::Error> {
+    /// client
+    ///     .add_to_path(sssh::Shell::Bash, "~/.local/bin")
+    ///     .await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn add_to_path(&self, shell: which_shell::Shell, dir: &str) -> Result<(), Error> {
+        let config = shell.path_config().ok_or_else(|| {
+            Error::Other(format!(
+                "{shell} has no configuration file to add '{dir}' to"
+            ))
+        })?;
+        let line = shell.path_line(dir).expect("path_config implies path_line");
+
+        self.exec_checked(&crate::path::add_line_command(config.file, &line))
+            .await
+            .map(|_| ())
+    }
+
     /// Send a graceful SSH disconnect.
     pub async fn disconnect(&self) {
         let _ = self

@@ -25,6 +25,7 @@ tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 tracing = "0.1"
+which-shell = { version = "0.1", git = "https://github.com/ahaoboy/which-shell" }
 
 # CLI-only dependencies (gated by the `cli` feature).
 clap = { version = "4", features = ["derive"], optional = true }
