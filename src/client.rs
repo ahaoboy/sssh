@@ -265,7 +265,19 @@ impl Client {
     ///     .await?;
     /// # Ok(()) }
     /// ```
-    pub async fn add_to_path(&self, shell: which_shell::Shell, dir: &str) -> Result<(), Error> {
+    /// ```no_run
+    /// # async fn run(client: sssh::Client) -> Result<(), sssh::Error> {
+    /// let file = client
+    ///     .add_to_path(sssh::Shell::Bash, "~/.local/bin")
+    ///     .await?;
+    /// println!("added to {}", file.display());
+    /// # Ok(()) }
+    /// ```
+    pub async fn add_to_path(
+        &self,
+        shell: which_shell::Shell,
+        dir: &str,
+    ) -> Result<std::path::PathBuf, Error> {
         let config = shell.path_config().ok_or_else(|| {
             Error::Other(format!(
                 "{shell} has no configuration file to add '{dir}' to"
@@ -275,7 +287,10 @@ impl Client {
 
         self.exec_checked(&crate::path::add_line_command(config.file, &line))
             .await
-            .map(|_| ())
+            .map(|_| ())?;
+
+        // Report the file in the remote home, which is what was written.
+        Ok(std::path::Path::new(self.home()).join(config.file))
     }
 
     /// Send a graceful SSH disconnect.
