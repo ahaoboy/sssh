@@ -285,9 +285,18 @@ impl Client {
         })?;
         let line = shell.path_line(dir).expect("path_config implies path_line");
 
-        self.exec_checked(&crate::path::add_line_command(config.file, &line))
-            .await
-            .map(|_| ())?;
+        // `exec_sh`: the script is POSIX, but the login shell may be fish or
+        // zsh, which reject `rc=…` and friends.
+        let script = crate::path::add_line_command(config.file, &line);
+        let out = self.exec_sh(&script).await?;
+        if !out.success() {
+            return Err(Error::Other(format!(
+                "adding '{dir}' to PATH failed on {} ({}): {}",
+                self.label(),
+                out.status,
+                out.stderr_lossy().trim()
+            )));
+        }
 
         // Report the file in the remote home, which is what was written.
         Ok(std::path::Path::new(self.home()).join(config.file))
